@@ -1,4 +1,4 @@
-# 🤖 AI SQL Chatbot
+# 🤖 AI Powered SQL Assistant
 
 Ask plain-English questions about any PostgreSQL database. The AI converts your question into a safe `SELECT` query, runs it, and explains the results — with charts when helpful.
 
