@@ -1,0 +1,30 @@
+# ── Backend ────────────────────────────────────────────────
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+python-dotenv==1.0.1
+pydantic==2.7.4
+pydantic-settings==2.3.3
+
+# ── Database ───────────────────────────────────────────────
+sqlalchemy==2.0.30
+asyncpg==0.29.0          # async PostgreSQL driver (app DB)
+psycopg2-binary==2.9.9   # sync driver (user-connected DB inspection)
+alembic==1.13.1
+
+# ── LangChain + Groq ───────────────────────────────────────
+langchain==0.2.5
+langchain-core==0.2.9
+langchain-groq==0.1.6
+
+# ── Utilities ──────────────────────────────────────────────
+pandas==2.2.2
+plotly==5.22.0
+httpx==0.27.0            # async HTTP client for health checks
+
+# ── Frontend ───────────────────────────────────────────────
+streamlit==1.36.0
+requests==2.32.3
+
+# ── Optional: Redis caching ────────────────────────────────
+# redis==5.0.6
+# aioredis==2.0.1
