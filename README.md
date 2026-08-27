@@ -85,7 +85,15 @@ cp .env.example .env
 psql -U postgres -c "CREATE DATABASE sql_chatbot;"
 ```
 
-The tables are created automatically when the backend starts.
+Apply the versioned database migration before starting the backend:
+
+```bash
+alembic upgrade head
+```
+
+For production, set `DATABASE_ENCRYPTION_KEY` to a Fernet key. It encrypts saved
+connection passwords at rest; keep the key in a secret manager and do not rotate
+it without a credential re-encryption plan.
 
 ### 4 · Run the backend
 
@@ -195,9 +203,18 @@ User types a question
 
 ## 🛡️ Security Notes
 
-- **Only `SELECT` queries are ever executed.** The validation runs both at the LLM prompt level and in Python code before execution.
-- Database passwords are stored in plaintext for simplicity. In production, encrypt them (e.g., with `cryptography.fernet`).
+- **Only one parsed `SELECT` query is executed.** The backend uses `sqlglot`, rejects DDL/DML, system schemas and risky functions, applies a server-side `LIMIT`, and runs the statement inside a read-only transaction with a timeout.
+- Database passwords are encrypted with Fernet before storage. Set `DATABASE_ENCRYPTION_KEY` in production; do not commit it.
+- Use credentials for a database account that has only the minimum `CONNECT` and `SELECT` privileges. The read-only transaction is a defence in depth measure, not a replacement for database permissions.
 - Consider adding authentication (e.g., Supabase Auth or a simple JWT layer) before deploying publicly.
+
+## 🗃️ Database migrations
+
+Schema changes are managed with Alembic, not by application startup. Run
+`alembic upgrade head` during deployment. The initial migration also upgrades an
+existing project database: it renames the legacy `password` column and encrypts
+the saved values. Back up the database and set the final encryption key before
+running it. Create future migrations with `alembic revision --autogenerate -m "describe change"`.
 
 ---
 

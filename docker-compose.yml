@@ -33,6 +33,7 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:password@postgres:5432/sql_chatbot
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
 
   # ── Streamlit frontend ───────────────────────────────────────────────────────
   frontend:

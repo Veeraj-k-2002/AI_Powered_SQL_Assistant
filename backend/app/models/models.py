@@ -11,7 +11,7 @@ Tables
 
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, DateTime, ForeignKey, Text
+from sqlalchemy import Column, String, DateTime, ForeignKey, Text, Index
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from app.db.session import Base
@@ -28,7 +28,7 @@ class ConnectedDatabase(Base):
     port = Column(String(10), nullable=False, default="5432")
     database_name = Column(String(120), nullable=False)
     username = Column(String(120), nullable=False)
-    password = Column(Text, nullable=False)              # ⚠ plaintext for simplicity; encrypt in prod
+    encrypted_password = Column(Text, nullable=False)
     schema_name = Column(String(120), nullable=False, default="public")
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -43,6 +43,9 @@ class ChatMessage(Base):
     """One turn in the chat: user question → SQL → result summary + optional chart."""
 
     __tablename__ = "chat_messages"
+    __table_args__ = (
+        Index("ix_chat_messages_database_created_at", "database_id", "created_at"),
+    )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     database_id = Column(

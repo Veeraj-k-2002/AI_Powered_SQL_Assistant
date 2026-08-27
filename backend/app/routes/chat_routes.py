@@ -34,5 +34,5 @@ async def ask(
     except AppException as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
     except Exception as exc:
-        logger.exception(f"Unexpected error: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
+        logger.exception("Unexpected chat request failure (%s)", type(exc).__name__)
+        raise HTTPException(status_code=500, detail="An internal error occurred while processing the request.")

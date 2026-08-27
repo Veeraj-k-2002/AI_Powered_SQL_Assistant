@@ -8,9 +8,10 @@ Also provides a live connection test.
 from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.future import select
-from sqlalchemy import text, inspect
+from sqlalchemy import text, inspect, URL
 
 from app.core.config import AppException
+from app.core.crypto import decrypt_secret, encrypt_secret
 from app.core.logger import get_logger
 from app.models.models import ConnectedDatabase
 from app.schemas.database_schema import (
@@ -36,7 +37,7 @@ class DatabaseService:
             port=data.port,
             database_name=data.database_name,
             username=data.username,
-            password=data.password,
+            encrypted_password=encrypt_secret(data.password),
             schema_name=data.schema_name,
         )
         db.add(record)
@@ -91,10 +92,18 @@ class DatabaseService:
         self, db: AsyncSession, database_id: UUID
     ) -> ConnectionTestResponse:
         record = await self._get_or_404(db, database_id)
-        uri = (
-            f"postgresql+asyncpg://{record.username}:{record.password}"
-            f"@{record.host}:{record.port}/{record.database_name}"
-        )
+        try:
+            uri = URL.create(
+                "postgresql+asyncpg",
+                username=record.username,
+                password=decrypt_secret(record.encrypted_password),
+                host=record.host,
+                port=int(record.port),
+                database=record.database_name,
+            )
+        except ValueError as exc:
+            logger.error("Could not decrypt credentials for database id=%s", database_id)
+            raise AppException(500, "Saved database credentials are unavailable. Update the connection.") from exc
         engine = create_async_engine(uri)
         try:
             async with engine.connect() as conn:
@@ -111,10 +120,10 @@ class DatabaseService:
                 tables_found=tables,
             )
         except Exception as exc:
-            logger.warning(f"Connection test failed for id={database_id}: {exc}")
+            logger.warning("Connection test failed for database id=%s (%s)", database_id, type(exc).__name__)
             return ConnectionTestResponse(
                 success=False,
-                message=str(exc),
+                message="Could not connect with the saved credentials. Check the connection details and try again.",
             )
         finally:
             await engine.dispose()

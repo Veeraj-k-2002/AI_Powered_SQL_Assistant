@@ -4,7 +4,7 @@ app/schemas/database_schema.py
 Pydantic request / response models for connected databases.
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from uuid import UUID
 from datetime import datetime
 from typing import Optional
@@ -20,6 +20,13 @@ class DatabaseCreate(BaseModel):
     username: str = Field(..., example="readonly_user")
     password: str = Field(..., example="supersecret")
     schema_name: str = Field(default="public", example="public")
+
+    @field_validator("port")
+    @classmethod
+    def validate_port(cls, value: str) -> str:
+        if not value.isdigit() or not 1 <= int(value) <= 65535:
+            raise ValueError("port must be between 1 and 65535")
+        return value
 
 
 class DatabaseUpdate(BaseModel):

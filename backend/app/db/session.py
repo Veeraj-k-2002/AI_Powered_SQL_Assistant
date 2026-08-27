@@ -44,9 +44,7 @@ async def get_db():
             await session.close()
 
 
-# ── Create all tables on startup ─────────────────────────────────────────────
+# ── Schema initialisation ────────────────────────────────────────────────────
 async def init_db():
-    """Create tables if they don't exist (development convenience)."""
-    async with engine.begin() as conn:
-        from app.models import models  # noqa: F401 — import so Base knows the models
-        await conn.run_sync(Base.metadata.create_all)
+    """Load model metadata; schema changes are applied only by Alembic."""
+    from app.models import models  # noqa: F401

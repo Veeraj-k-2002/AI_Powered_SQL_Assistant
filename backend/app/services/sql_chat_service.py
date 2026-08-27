@@ -20,26 +20,34 @@ import re
 import json
 import math
 import asyncio
+import hashlib
 from decimal import Decimal
 from datetime import datetime
 from textwrap import dedent
 from uuid import UUID
 
 import pandas as pd
-from sqlalchemy import text, inspect
+from sqlalchemy import text, inspect, URL
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.future import select
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 from langchain_groq import ChatGroq
+from sqlglot import exp, parse
 
 from app.core.config import settings, AppException
+from app.core.crypto import decrypt_secret
 from app.core.logger import get_logger
 from app.models.models import ConnectedDatabase, ChatMessage
 from app.schemas.chat_schema import ChartConfig, ChartData
+from app.services.query_cache import QueryResultCache
 
 logger = get_logger(__name__)
+query_cache = QueryResultCache(
+    ttl_seconds=settings.QUERY_CACHE_TTL_SECONDS,
+    max_entries=settings.QUERY_CACHE_MAX_ENTRIES,
+)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -88,10 +96,18 @@ class _UserDatabase:
             return await conn.run_sync(_inspect)
 
     async def run_query(self, sql: str) -> pd.DataFrame:
-        """Execute a SELECT and return results as a DataFrame."""
+        """Execute a bounded SELECT in a database-enforced read-only transaction."""
         async with self.engine.connect() as conn:
-            rows = (await conn.execute(text(sql))).mappings().all()
+            async with conn.begin():
+                await conn.execute(text("SET TRANSACTION READ ONLY"))
+                # The setting is validated at application startup, so interpolation
+                # cannot be influenced by SQL supplied by a user or model.
+                await conn.execute(text(f"SET LOCAL statement_timeout = {settings.QUERY_TIMEOUT_MS}"))
+                rows = (await conn.execute(text(sql))).mappings().all()
         return pd.DataFrame(rows)
+
+    async def dispose(self) -> None:
+        await self.engine.dispose()
 
     async def list_tables(self) -> list[str]:
         async with self.engine.connect() as conn:
@@ -112,8 +128,6 @@ class SqlChatService:
             groq_api_key=settings.GROQ_API_KEY,
             temperature=0,
         )
-        self._query_cache: dict[str, pd.DataFrame] = {}
-        self._lock = asyncio.Lock()
 
     # ── Database connection ──────────────────────────────────────────────────
 
@@ -129,9 +143,17 @@ class SqlChatService:
             raise AppException(404, "Database connection not found.")
 
         cfg = result
-        uri = (
-            f"postgresql+asyncpg://{cfg.username}:{cfg.password}"
-            f"@{cfg.host}:{cfg.port}/{cfg.database_name}"
+        try:
+            password = decrypt_secret(cfg.encrypted_password)
+        except ValueError as exc:
+            raise AppException(500, "Saved database credentials are unavailable. Update the connection.") from exc
+        uri = URL.create(
+            "postgresql+asyncpg",
+            username=cfg.username,
+            password=password,
+            host=cfg.host,
+            port=int(cfg.port),
+            database=cfg.database_name,
         )
         engine = create_async_engine(uri, pool_pre_ping=True)
 
@@ -140,7 +162,9 @@ class SqlChatService:
             async with engine.connect() as conn:
                 await conn.execute(text("SELECT 1"))
         except Exception as exc:
-            raise AppException(503, f"Cannot connect to database: {exc}") from exc
+            await engine.dispose()
+            logger.warning("Database connection failed for id=%s (%s)", database_id, type(exc).__name__)
+            raise AppException(503, "Cannot connect to the selected database. Check its saved connection details.") from exc
 
         return _UserDatabase(engine, cfg.schema_name), cfg
 
@@ -212,7 +236,8 @@ class SqlChatService:
             err = str(exc)
             if "rate_limit" in err.lower():
                 raise AppException(429, "LLM rate limit reached. Try again shortly.")
-            raise AppException(500, f"LLM error: {err}") from exc
+            logger.error("SQL generation failed (%s)", type(exc).__name__)
+            raise AppException(502, "The SQL generation service is temporarily unavailable.") from exc
 
     async def _summarise_result(
         self, user_query: str, schema: str, df: pd.DataFrame
@@ -272,7 +297,7 @@ class SqlChatService:
             return summary
 
         except Exception as exc:
-            logger.warning(f"Summary generation failed: {exc}")
+            logger.warning("Summary generation failed (%s)", type(exc).__name__)
             return "Results retrieved. See the table below."
 
     async def _pick_chart(self, user_query: str, df: pd.DataFrame) -> ChartConfig:
@@ -340,22 +365,51 @@ class SqlChatService:
 
     @staticmethod
     def _validate_sql(sql: str) -> str:
-        """Strip formatting artefacts and enforce SELECT-only policy."""
+        """Parse and enforce one bounded, schema-safe, read-only PostgreSQL query."""
         sql = re.sub(r"```sql|```", "", sql).strip()
         sql = re.sub(r"(?i)^\[?SQL:\s*", "", sql).strip()
 
         if sql == "UNSUPPORTED_QUERY":
             raise AppException(400, "This question cannot be answered with a SELECT query.")
 
-        lowered = sql.lower()
-        forbidden = {"delete", "insert", "update", "alter", "drop", "truncate", "create"}
-        found = [kw for kw in forbidden if re.search(rf"\b{kw}\b", lowered)]
-        if found or not lowered.startswith("select"):
-            raise AppException(
-                400,
-                f"Only SELECT queries are allowed. Detected: {', '.join(found) or 'non-SELECT'}",
-            )
-        return sql
+        try:
+            statements = parse(sql, read="postgres")
+        except Exception as exc:
+            raise AppException(400, "The generated SQL could not be parsed safely.") from exc
+
+        if len(statements) != 1 or statements[0] is None:
+            raise AppException(400, "Exactly one read-only SELECT statement is allowed.")
+        statement = statements[0]
+        if not isinstance(statement, exp.Select) or statement.args.get("into"):
+            raise AppException(400, "Only a SELECT query is allowed.")
+
+        forbidden_nodes = (exp.Insert, exp.Update, exp.Delete, exp.Create, exp.Drop, exp.Alter, exp.Command)
+        if any(statement.find(node) for node in forbidden_nodes):
+            raise AppException(400, "The query contains a disallowed operation.")
+
+        blocked_schemas = {"pg_catalog", "information_schema", "pg_toast"}
+        for table in statement.find_all(exp.Table):
+            if (table.db or "").lower() in blocked_schemas or (table.catalog or "").lower() in blocked_schemas:
+                raise AppException(400, "System schemas cannot be queried.")
+
+        dangerous_functions = {
+            "pg_sleep", "pg_read_file", "pg_read_binary_file", "pg_ls_dir",
+            "pg_stat_file", "dblink", "dblink_connect", "lo_import", "lo_export",
+            "set_config", "current_setting",
+        }
+        for function in statement.find_all(exp.Func):
+            if function.sql_name().lower() in dangerous_functions:
+                raise AppException(400, "The query uses a disallowed database function.")
+
+        # Enforce a server-defined cap even if the model omitted a LIMIT or chose
+        # a larger one. sqlglot serialises an AST, never model-provided raw SQL.
+        limit = statement.args.get("limit")
+        current_limit = None
+        if limit and isinstance(limit.expression, exp.Literal) and limit.expression.is_int:
+            current_limit = int(limit.expression.this)
+        if current_limit is None or current_limit > settings.MAX_QUERY_ROWS:
+            statement = statement.limit(settings.MAX_QUERY_ROWS)
+        return statement.sql(dialect="postgres")
 
     # ── Public entry point ───────────────────────────────────────────────────
 
@@ -368,6 +422,7 @@ class SqlChatService:
             status="error",
         )
 
+        user_db = None
         try:
             # 1. Connect to the user's database
             user_db, _cfg = await self._get_user_db(database_id)
@@ -386,15 +441,16 @@ class SqlChatService:
             clean_sql = self._validate_sql(raw_sql)
             new_msg.sql_query = clean_sql
 
-            # 5. Execute query (with simple in-memory cache)
-            async with self._lock:
-                if clean_sql in self._query_cache:
-                    df = self._query_cache[clean_sql]
-                    logger.debug("Cache hit for query.")
-                else:
-                    df = await user_db.run_query(clean_sql)
-                    self._query_cache[clean_sql] = df
-                    logger.info(f"Query returned {len(df)} rows.")
+            # 5. Execute query with a process-wide, schema-aware TTL cache.
+            schema_hash = hashlib.sha256(schema.encode()).hexdigest()
+            cache_key = f"{database_id}:{schema_hash}:{clean_sql}"
+            df = await query_cache.get(cache_key)
+            if df is not None:
+                logger.debug("Query cache hit for database id=%s", database_id)
+            else:
+                df = await user_db.run_query(clean_sql)
+                await query_cache.set(cache_key, df)
+                logger.info("Query returned %s rows.", len(df))
 
             # Serialise table for storage
             for col in df.select_dtypes(include=["object"]).columns:
@@ -413,14 +469,19 @@ class SqlChatService:
 
             new_msg.status = "success"
 
-        except AppException:
+        except AppException as exc:
+            # AppException details are deliberately user-safe; persist them so a
+            # history view explains why a rejected request did not run.
+            new_msg.error_message = exc.detail
             raise
         except Exception as exc:
-            logger.exception(f"Unexpected error in chat pipeline: {exc}")
-            new_msg.error_message = str(exc)
+            logger.exception("Unexpected chat pipeline failure (%s)", type(exc).__name__)
+            new_msg.error_message = "The query could not be completed safely. Please try again."
             new_msg.status = "error"
 
         finally:
+            if user_db is not None:
+                await user_db.dispose()
             self.db.add(new_msg)
             await self.db.commit()
             await self.db.refresh(new_msg)

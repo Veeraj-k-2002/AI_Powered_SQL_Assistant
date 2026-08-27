@@ -20,8 +20,8 @@ logger = get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Create tables on startup."""
-    logger.info("Starting up — initialising database tables…")
+    """Load application metadata; database changes are managed by Alembic."""
+    logger.info("Starting up — verifying application metadata…")
     await init_db()
     logger.info("Database ready.")
     yield

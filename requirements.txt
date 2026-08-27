@@ -10,6 +10,8 @@ sqlalchemy==2.0.30
 asyncpg==0.29.0          # async PostgreSQL driver (app DB)
 psycopg2-binary==2.9.9   # sync driver (user-connected DB inspection)
 alembic==1.13.1
+cryptography==42.0.8
+sqlglot==25.10.0
 
 # ── LangChain + Groq ───────────────────────────────────────
 langchain==0.2.5
