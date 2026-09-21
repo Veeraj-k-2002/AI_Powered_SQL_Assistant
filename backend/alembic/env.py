@@ -16,7 +16,12 @@ from app.db.session import Base
 from app.models import models  # noqa: F401 - register ORM models
 
 config = context.config
-config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+config.set_main_option(
+    "sqlalchemy.url",
+    settings.DATABASE_URL.replace("%", "%%")
+)
+
 if config.config_file_name:
     fileConfig(config.config_file_name)
 
